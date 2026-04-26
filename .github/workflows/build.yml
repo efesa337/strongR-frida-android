@@ -1,7 +1,7 @@
-name: strongR-frida
+name: strongR-frida-AUTO
 
 on:
-  workflow_dispatch: # Запуск кнопкой
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -32,52 +32,43 @@ jobs:
         with:
           ndk-version: r25b
 
-      - name: Build strongR-Frida
+      - name: Build and Patch Frida
         env:
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "github-actions@github.com"
-          
-          # Получаем версию Frida
+          # 1. Получаем актуальную версию
           FRIDA_VERSION=$(curl -s https://api.github.com/repos/frida/frida/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
           echo "FRIDA_VER=$FRIDA_VERSION" >> $GITHUB_ENV
-          echo "Building Frida $FRIDA_VERSION"
-
-          # КЛОНИРУЕМ РЕПОЗИТОРИЙ С ТВОЕГО СКРИНШОТА
-          git clone https://github.com/hluwa/Patchs.git ./PatchRepo
           
-          # КЛОНИРУЕМ ФРИДУ
+          # 2. Клонируем Фриду
           git clone --recurse-submodules https://github.com/frida/frida.git
           cd frida
-          
-          # ПРИМЕНЯЕМ ПАТЧИ ИЗ hluwa/Patchs/strongR-frida
-          echo "Applying patches..."
-          # Патчи лежат в PatchRepo/strongR-frida/название_проекта
-          for d in ../PatchRepo/strongR-frida/*; do
-            if [ -d "$d" ]; then
-              subproject=$(basename "$d")
-              echo "Checking subproject: $subproject"
-              if [ -d "subprojects/$subproject" ]; then
-                echo "Patching subprojects/$subproject"
-                cd subprojects/$subproject
-                # Применяем все .patch файлы из этой папки
-                git am ../../../PatchRepo/strongR-frida/$subproject/*.patch || echo "Some patches failed to apply, skipping conflicts..."
-                cd ../..
-              fi
-            fi
-          done
 
-          # СБОРКА
+          # 3. «ЖЕСТКИЙ» ПАТЧИНГ (sed вместо кривых файлов патчей)
+          echo "Запускаю автоматический патчинг строк..."
+          
+          # Меняем название проекта и пайпов (основные детекты)
+          find . -type f -not -path '*/.*' -exec sed -i 's/frida/hluda/g' {} +
+          find . -type f -not -path '*/.*' -exec sed -i 's/Frida/Hluda/g' {} +
+          find . -type f -not -path '*/.*' -exec sed -i 's/re.frida.server/re.hluda.server/g' {} +
+          find . -type f -not -path '*/.*' -exec sed -i 's/gum-js-loop/gum-js-poll/g' {} +
+          find . -type f -not -path '*/.*' -exec sed -i 's/gmain/hmain/g' {} +
+          
+          echo "Патчинг завершен успешно."
+
+          # 4. СБОРКА (Используем правильные команды)
           export PATH=$PATH:$ANDROID_NDK_ROOT
           
-          # Сборка серверов
+          # Исправляем возможные проблемы с конфигурацией
+          python3 releng/setup-env.py --host=android-arm64
+          
+          echo "Начинаю сборку серверов..."
           make server-android-arm -j$(nproc)
           make server-android-arm64 -j$(nproc)
           make server-android-x86 -j$(nproc)
           make server-android-x86_64 -j$(nproc)
           
-          # Сборка гаджетов
+          echo "Начинаю сборку гаджетов..."
           make gadget-android-arm -j$(nproc)
           make gadget-android-arm64 -j$(nproc)
 
@@ -86,14 +77,16 @@ jobs:
           mkdir -p output
           VER=${{ env.FRIDA_VER }}
           
-          # Собираем готовые файлы
-          find frida/build/frida-android-arm/bin/ -name "frida-server" -exec cp {} output/hluda-server-$VER-android-arm \; || true
-          find frida/build/frida-android-arm64/bin/ -name "frida-server" -exec cp {} output/hluda-server-$VER-android-arm64 \; || true
-          find frida/build/frida-android-x86/bin/ -name "frida-server" -exec cp {} output/hluda-server-$VER-android-x86 \; || true
-          find frida/build/frida-android-x86_64/bin/ -name "frida-server" -exec cp {} output/hluda-server-$VER-android-x86_64 \; || true
+          # Копируем всё что скомпилилось
+          find frida/build/ -name "frida-server" | while read line; do
+            arch=$(echo $line | cut -d'/' -f3 | cut -d'-' -f3-)
+            cp "$line" "output/hluda-server-$VER-android-$arch"
+          done
           
-          find frida/build/frida-android-arm/lib/frida/32/ -name "frida-gadget.so" -exec cp {} output/hluda-gadget-$VER-android-arm.so \; || true
-          find frida/build/frida-android-arm64/lib/frida/64/ -name "frida-gadget.so" -exec cp {} output/hluda-gadget-$VER-android-arm64.so \; || true
+          find frida/build/ -name "frida-gadget.so" | while read line; do
+            arch=$(echo $line | cut -d'/' -f3 | cut -d'-' -f3-)
+            cp "$line" "output/hluda-gadget-$VER-android-$arch.so"
+          done
 
           gzip output/*
 
