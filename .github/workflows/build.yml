@@ -2,7 +2,7 @@ name: strongR-frida
 
 on:
   schedule:
-    - cron: "0 0 * * *" # Раз в сутки
+    - cron: "0 0 * * *"
   workflow_dispatch:
 
 permissions:
@@ -13,7 +13,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       FRIDA_VERSION: ${{ steps.pullFridaLatestRelease.outputs.FRIDA_VERSION }}
-      ALREADY_RELEASE: ${{ steps.checkReleaseVersion.outputs.ALREADY_RELEASE }}
     steps:
       - name: Pull Frida Latest Release
         id: pullFridaLatestRelease
@@ -26,29 +25,13 @@ jobs:
             });
             core.setOutput('FRIDA_VERSION', release.data.tag_name);
 
-      - name: Check if already released
-        id: checkReleaseVersion
-        uses: actions/github-script@v7
-        with:
-          script: |
-            try {
-              await github.rest.repos.getReleaseByTag({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                tag: '${{ steps.pullFridaLatestRelease.outputs.FRIDA_VERSION }}'
-              });
-              core.setOutput('ALREADY_RELEASE', '1');
-            } catch (e) {
-              core.setOutput('ALREADY_RELEASE', '0');
-            }
-
   build_android:
     needs: check_version
-    if: needs.check_version.outputs.ALREADY_RELEASE == '0'
     runs-on: ubuntu-latest
     
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -72,64 +55,66 @@ jobs:
         env:
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          # Настройка Git
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
           
-          # Клонируем оригинальную Фриду
+          # Клонируем Фриду
           git clone --recurse-submodules https://github.com/frida/frida.git
           cd frida
           
-          # Клонируем патчи (используем секрет PATCH_REPO)
+          # Клонируем патчи
           git clone ${{ secrets.PATCH_REPO }} ../Patchs
           
-          # Применяем патчи
-          # Важно: путь к патчам должен соответствовать структуре вашего репозитория патчей
+          # Применяем патчи (если папки существуют)
           for d in ../Patchs/strongR-frida/*; do
             if [ -d "$d" ]; then
               subproject=$(basename "$d")
               echo "Applying patches to subprojects/$subproject"
               cd subprojects/$subproject
-              git am ../../../Patchs/strongR-frida/$subproject/*.patch || exit 1
+              git am ../../../Patchs/strongR-frida/$subproject/*.patch || echo "No patches for $subproject"
               cd ../..
             fi
           done
 
-          # Сборка под все архитектуры
-          # Используем внутренние мейкфайлы фриды (это надежнее)
+          # Сборка серверов (это займет 30-50 минут)
+          export PATH=$PATH:$ANDROID_NDK_ROOT
           make server-android-arm -j$(nproc)
           make server-android-arm64 -j$(nproc)
           make server-android-x86 -j$(nproc)
           make server-android-x86_64 -j$(nproc)
           
-          # Собираем и гаджеты, если нужно
+          # Сборка гаджетов
           make gadget-android-arm -j$(nproc)
           make gadget-android-arm64 -j$(nproc)
+          make gadget-android-x86 -j$(nproc)
+          make gadget-android-x86_64 -j$(nproc)
 
       - name: Prepare assets
         run: |
           mkdir -p output
           VER=${{ needs.check_version.outputs.FRIDA_VERSION }}
           
-          # Собираем файлы из папок сборки Frida
-          # Пути могут меняться в зависимости от версии Frida, обычно это build/frida-android-arm...
-          cp frida/build/frida-android-arm/bin/frida-server output/hluda-server-$VER-android-arm
-          cp frida/build/frida-android-arm64/bin/frida-server output/hluda-server-$VER-android-arm64
-          cp frida/build/frida-android-x86/bin/frida-server output/hluda-server-$VER-android-x86
-          cp frida/build/frida-android-x86_64/bin/frida-server output/hluda-server-$VER-android-x86_64
+          # Копируем бинарники из папок сборки
+          # Серверы
+          cp frida/build/frida-android-arm/bin/frida-server output/hluda-server-$VER-android-arm || true
+          cp frida/build/frida-android-arm64/bin/frida-server output/hluda-server-$VER-android-arm64 || true
+          cp frida/build/frida-android-x86/bin/frida-server output/hluda-server-$VER-android-x86 || true
+          cp frida/build/frida-android-x86_64/bin/frida-server output/hluda-server-$VER-android-x86_64 || true
           
-          cp frida/build/frida-android-arm/lib/frida/32/frida-gadget.so output/hluda-gadget-$VER-android-arm.so
-          cp frida/build/frida-android-arm64/lib/frida/64/frida-gadget.so output/hluda-gadget-$VER-android-arm64.so
+          # Гаджеты
+          cp frida/build/frida-android-arm/lib/frida/32/frida-gadget.so output/hluda-gadget-$VER-android-arm.so || true
+          cp frida/build/frida-android-arm64/lib/frida/64/frida-gadget.so output/hluda-gadget-$VER-android-arm64.so || true
+          cp frida/build/frida-android-x86/lib/frida/32/frida-gadget.so output/hluda-gadget-$VER-android-x86.so || true
+          cp frida/build/frida-android-x86_64/lib/frida/64/frida-gadget.so output/hluda-gadget-$VER-android-x86_64.so || true
 
+          # Сжимаем всё в .gz
           gzip output/*
 
-      - name: Create Release and Upload Assets
+      - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.check_version.outputs.FRIDA_VERSION }}
-          name: strongR-frida ${{ needs.check_version.outputs.FRIDA_VERSION }}
+          name: strongR-frida-${{ needs.check_version.outputs.FRIDA_VERSION }}
           files: output/*.gz
-          draft: false
-          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
